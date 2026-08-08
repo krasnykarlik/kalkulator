@@ -1,0 +1,144 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Phase 3: Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isEditor(projectId) {
+      let p = get(/databases/$(database)/documents/projects/$(projectId)).data;
+      return isSignedIn() && p.get('editors', []).hasAny([request.auth.uid]);
+    }
+
+    function isSU() {
+      return isSignedIn() && request.auth.token.email == "krasnykarlik@gmail.com" && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // 1. Validation Blueprints
+    function isValidProject(p) {
+      return p.id is string && p.id.size() <= 128 &&
+             p.name is string && p.name.size() > 0 && p.name.size() <= 256 &&
+             p.offerPrice is number && p.offerPrice >= 0 &&
+             p.status in ['aktivní', 'dokončeno', 'pozastaveno', 'smazáno'] &&
+             p.startDate is string && p.startDate.size() <= 64 &&
+             (!('endDate' in p) || (p.endDate is string && p.endDate.size() <= 64)) &&
+             (!('editors' in p) || p.editors is list) &&
+             p.ownerId == request.auth.uid &&
+             p.createdAt == request.time &&
+             p.updatedAt == request.time;
+    }
+
+    function isValidCost(c) {
+      return c.id is string && c.id.size() <= 128 &&
+             c.projectId is string && c.projectId.size() <= 128 &&
+             c.description is string && c.description.size() > 0 && c.description.size() <= 512 &&
+             c.amount is number && c.amount >= 0 &&
+             c.category in ['materiál', 'práce', 'subdodávky', 'doprava', 'režie', 'ostatní'] &&
+             c.date is string && c.date.size() <= 64 &&
+             (!('note' in c) || (c.note is string && c.note.size() <= 1000)) &&
+             c.ownerId == request.auth.uid &&
+             c.createdAt == request.time &&
+             c.updatedAt == request.time;
+    }
+
+    // 2. Collection Rules
+    match /projects/{projectId} {
+      allow get, list: if isSignedIn();
+      
+      allow create: if isEmailVerified() && isValidId(projectId) && isValidProject(incoming()) && incoming().id == projectId;
+      
+      allow update: if isEmailVerified() && (isOwner(existing().ownerId) || isEditor(projectId) || isSU()) && 
+        incoming().updatedAt == request.time && 
+        incoming().ownerId == existing().ownerId && 
+        incoming().createdAt == existing().createdAt && (
+          isSU() || 
+          // Editors logic: cannot change editors list
+          (isEditor(projectId) && !isOwner(existing().ownerId) && !incoming().diff(existing()).affectedKeys().hasAny(['editors']) && (
+             (existing().status != 'dokončeno' && existing().status != 'smazáno' && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'offerPrice', 'status', 'startDate', 'endDate', 'updatedAt'])) ||
+             ((existing().status == 'dokončeno' || existing().status == 'smazáno') && incoming().status == 'aktivní' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+          )) ||
+          // Owner logic: can change everything including editors
+          (isOwner(existing().ownerId) && (
+            (existing().status != 'dokončeno' && existing().status != 'smazáno' && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'offerPrice', 'status', 'startDate', 'endDate', 'updatedAt', 'editors'])) ||
+            ((existing().status == 'dokončeno' || existing().status == 'smazáno') && incoming().status == 'aktivní' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])) ||
+            (existing().status != 'smazáno' && incoming().status == 'smazáno' && incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+          ))
+        );
+      
+      allow delete: if isOwner(existing().ownerId) || isSU();
+    }
+
+    match /costs/{costId} {
+      allow get, list: if isSignedIn();
+
+      allow create: if isEmailVerified() && isValidId(costId) && isValidCost(incoming()) && incoming().id == costId && (
+                       isSU() || isEditor(incoming().projectId) || (
+                         // Relational check: project must exist (any user can read it, but write is only for project owner)
+                         get(/databases/$(database)/documents/projects/$(incoming().projectId)).data.ownerId == request.auth.uid &&
+                         // Check terminal state: project cannot be finished
+                         get(/databases/$(database)/documents/projects/$(incoming().projectId)).data.status != 'dokončeno'
+                       )
+                    );
+
+      allow update: if isEmailVerified() && (isOwner(existing().ownerId) || isEditor(existing().projectId) || isSU()) && (
+                       isSU() || (
+                         // Only allow modification if project is still active
+                         get(/databases/$(database)/documents/projects/$(existing().projectId)).data.status != 'dokončeno' &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['description', 'amount', 'category', 'date', 'note', 'updatedAt'])
+                       )
+                    ) &&
+                    incoming().updatedAt == request.time &&
+                    incoming().ownerId == existing().ownerId &&
+                    incoming().projectId == existing().projectId &&
+                    incoming().createdAt == existing().createdAt;
+
+      allow delete: if (isOwner(existing().ownerId) || isEditor(existing().projectId) || isSU()) && (
+                       isSU() || get(/databases/$(database)/documents/projects/$(existing().projectId)).data.status != 'dokončeno'
+                    );
+    }
+
+    match /logs/{logId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && 
+                       incoming().id == logId && 
+                       incoming().userId == request.auth.uid &&
+                       incoming().timestamp == request.time;
+    }
+
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(userId) || isSU();
+    }
+
+    match /settings/global {
+      allow read: if isSignedIn();
+      allow write: if isEmailVerified();
+    }
+  }
+}
