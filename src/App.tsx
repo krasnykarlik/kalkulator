@@ -120,23 +120,46 @@ export default function App() {
     onConfirm: () => {}
   });
 
-  // Auth Observer (Bypass pro vývoj)
+  // Auth Observer
   useEffect(() => {
-    // Vytvoříme falešného uživatele, aby nás to hned pustilo dál
-    const mockUser = {
-      id: 'dev-karel-123',
-      email: 'krasnykarlik@gmail.com', // Tímto se stáváš SuperUserem
-      user_metadata: { full_name: 'Karel (Vývojář)' }
-    } as SupabaseUser;
-    
-    setUser(mockUser);
-    db.saveUser({
-      uid: mockUser.id,
-      email: mockUser.email || '',
-      displayName: mockUser.user_metadata.full_name
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      handleUserChange(session?.user ?? null);
     });
-    setLoading(false);
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      handleUserChange(session?.user ?? null);
+    });
+
+    function handleUserChange(u: SupabaseUser | null) {
+      const ALLOWED_EMAILS = ['krasnykarlik@gmail.com', 'rohlik49@gmail.com'];
+
+      if (u) {
+        if (!ALLOWED_EMAILS.includes(u.email || '')) {
+          supabase.auth.signOut().then(() => {
+            setUser(null);
+            setLoading(false);
+            alert('Přístup odepřen: Tento účet nemá oprávnění používat tuto aplikaci.');
+            window.location.href = window.location.pathname; // Bezpečný návrat na čistou úvodní stránku
+          });
+          return;
+        }
+
+        setUser(u);
+        db.saveUser({
+          uid: u.id,
+          email: u.email || '',
+          displayName: u.user_metadata?.full_name || 'Uživatel',
+          photoURL: u.user_metadata?.avatar_url || undefined
+        });
+      } else {
+        setUser(null);
+      }
+      setLoading(false);
+    }
+
+    return () => subscription.unsubscribe();
   }, []);
+
 
   // Data Subscriptions
   useEffect(() => {
@@ -149,7 +172,7 @@ export default function App() {
 
     const unsubProjects = db.subscribeToProjects(setProjects);
     const unsubCosts = db.subscribeToAllCosts(setAllCosts);
-    const unsubLogs = db.subscribeToLogs(20, setLogs);
+    const unsubLogs = db.subscribeToLogs(50, setLogs);
     const unsubSettings = db.subscribeToSettings((settings) => {
       if (settings.alertThreshold) {
         setAlertThreshold(settings.alertThreshold);
@@ -452,15 +475,23 @@ export default function App() {
 
         <div className="p-3 border-t border-[#1e293b]">
            <div className="bg-[#1e293b]/50 rounded-xl p-3 flex items-center gap-3 mb-4 overflow-hidden">
-             {user.photoURL ? (
-               <img src={user.photoURL} alt={user.displayName || ''} className="w-8 h-8 rounded-full border border-slate-700" referrerPolicy="no-referrer" />
+             {user.user_metadata?.avatar_url || user.photoURL ? (
+               <img 
+                 src={user.user_metadata?.avatar_url || user.photoURL} 
+                 alt={user.user_metadata?.full_name || 'Uživatel'} 
+                 className="w-8 h-8 rounded-full border border-slate-700" 
+                 referrerPolicy="no-referrer" 
+               />
              ) : (
                <div className="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center text-white">
                  <User size={16} />
                </div>
              )}
              <div className="hidden md:block truncate">
-               <p className="text-xs font-bold text-white truncate">{user.displayName || 'Uživatel'}</p>
+               <p className="text-xs font-bold text-white truncate">
+                 {user.user_metadata?.full_name || user.displayName || 'Uživatel'}
+               </p>
+
                <button onClick={logout} className="text-[10px] text-slate-400 hover:text-white flex items-center gap-1 transition-colors">
                  <LogOut size={10} />
                  Odhlásit se

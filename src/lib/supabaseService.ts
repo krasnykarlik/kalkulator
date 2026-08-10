@@ -18,7 +18,35 @@ const subscribeToTable = (table: string, orderColumn: string, callback: (data: a
 
 export const subscribeToProjects = (callback: (projects: Project[]) => void) => subscribeToTable('projects', 'createdAt', callback);
 export const subscribeToAllCosts = (callback: (costs: CostItem[]) => void) => subscribeToTable('costs', 'createdAt', callback);
-export const subscribeToLogs = (limitCount: number, callback: (logs: ActivityLog[]) => void) => subscribeToTable('logs', 'timestamp', callback);
+export const subscribeToLogs = (limitCount: number, callback: (logs: ActivityLog[]) => void) => {
+  // Okamžité načtení omezeného počtu posledních záznamů
+  supabase
+    .from('logs')
+    .select('*')
+    .order('timestamp', { ascending: false })
+    .limit(limitCount)
+    .then(({ data }) => {
+      if (data) callback(data as ActivityLog[]);
+    });
+
+  // Real-time posluchač pro budoucí změny (pokud ho využíváš)
+  const channel = supabase
+    .channel('public:logs')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'logs' }, async () => {
+      const { data } = await supabase
+        .from('logs')
+        .select('*')
+        .order('timestamp', { ascending: false })
+        .limit(limitCount);
+      if (data) callback(data as ActivityLog[]);
+    })
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+};
+
 export const subscribeToUsers = (callback: (users: AppUser[]) => void) => subscribeToTable('users', 'lastLogin', callback);
 
 export const subscribeToSettings = (callback: (settings: { alertThreshold: number }) => void) => {
@@ -37,9 +65,21 @@ export const createProject = async (project: Omit<Project, 'id'>) => {
   const { data: { session } } = await supabase.auth.getSession();
   if (!session?.user) return null;
   const id = crypto.randomUUID();
-  await supabase.from('projects').insert([{ ...project, id, ownerId: session.user.id, createdAt: new Date(), updatedAt: new Date() }]);
-  return id;
+  
+  const { data, error } = await supabase
+    .from('projects')
+    .insert([{ ...project, id, ownerId: session.user.id, createdAt: new Date(), updatedAt: new Date() }])
+    .select()
+    .single();
+
+  if (error) {
+    console.error('Chyba při vytváření zakázky:', error);
+    return null;
+  }
+  
+  return data.id;
 };
+
 
 export const updateProject = async (projectId: string, data: Partial<Project>) => {
   await supabase.from('projects').update({ ...data, updatedAt: new Date() }).eq('id', projectId);
