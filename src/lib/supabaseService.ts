@@ -16,7 +16,35 @@ const subscribeToTable = (table: string, orderColumn: string, callback: (data: a
   return () => { supabase.removeChannel(channel); };
 };
 
-export const subscribeToProjects = (callback: (projects: Project[]) => void) => subscribeToTable('projects', 'createdAt', callback);
+export const subscribeToProjects = (callback: (projects: Project[]) => void) => {
+  // Okamžité načtení dat při startu
+  const fetchProjects = async () => {
+    const { data, error } = await supabase
+      .from('projects')
+      .select('*')
+      .order('startDate', { ascending: false });
+    
+    if (data) {
+      callback(data as Project[]);
+    } else if (error) {
+      console.error('Chyba při načítání zakázek:', error);
+    }
+  };
+
+  fetchProjects();
+
+  // Real-time posluchač změn - jakmile se cokoliv stane, ihned stáhne čerstvá data
+  const channel = supabase
+    .channel('public:projects')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'projects' }, () => {
+      fetchProjects();
+    })
+    .subscribe();
+
+  return () => {
+    supabase.removeChannel(channel);
+  };
+};
 export const subscribeToAllCosts = (callback: (costs: CostItem[]) => void) => subscribeToTable('costs', 'createdAt', callback);
 export const subscribeToLogs = (limitCount: number, callback: (logs: ActivityLog[]) => void) => {
   // Okamžité načtení omezeného počtu posledních záznamů
