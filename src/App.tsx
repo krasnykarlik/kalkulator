@@ -232,6 +232,10 @@ export default function App() {
 
   // Actions
   const handleAddProject = async (projectData: Omit<Project, 'id'>) => {
+    // 1. Okamžitě zavřeme okno (uživatel vidí rychlou reakci)
+    setIsAddingProject(false);
+
+    // 2. Na pozadí se v klidu uloží data do databáze a vytvoří log
     const id = await db.createProject(projectData);
     if (id) {
       await db.createLog({
@@ -240,12 +244,8 @@ export default function App() {
         targetName: projectData.name,
         details: `Vytvořena zakázka za ${formatCurrency(projectData.offerPrice)}`
       });
-      // Vynutíme okamžité znovunačtení do lokálního stavu
-      db.subscribeToProjects(setProjects);
     }
-    setIsAddingProject(false);
   };
-
 
   const handleAddCost = async (costData: Omit<CostItem, 'id' | 'projectId'>) => {
     if (!selectedProjectId || !selectedProject) return;
